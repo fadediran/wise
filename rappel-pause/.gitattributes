@@ -1,0 +1,3 @@
+# cmd.exe interprète mal les fichiers .bat sans fins de ligne CRLF :
+# ils sont stockés tels quels (CRLF), quel que soit le mode de téléchargement.
+*.bat -text
