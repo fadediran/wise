@@ -12,7 +12,7 @@ Objectif : sensibiliser aux risques de la position assise prolongée en incitant
 
 ## Installation
 
-**Prérequis : Python 3.8 ou plus récent.**
+**Prérequis : Python 3.8 ou plus récent**, sauf sous Windows avec l'exécutable autonome `RappelPause.exe`.
 
 | Système | Python |
 |---|---|
@@ -22,7 +22,13 @@ Objectif : sensibiliser aux risques de la position assise prolongée en incitant
 
 ### Windows
 
-Copier le dossier `rappel-pause` sur le poste, puis **double-cliquer sur `installer_windows.bat`**.
+- **Sans Python** : télécharger `RappelPause.exe` (voir [Déploiement](#déploiement-sur-un-parc-windows-sans-python)),
+  **double-cliquer dessus** puis répondre **Oui** à « Installer le rappel de pause active ? ». Une fenêtre confirme
+  l'installation.
+- **Avec Python** : copier le dossier `rappel-pause` sur le poste, puis **double-cliquer sur `installer_windows.bat`**.
+
+Dans les deux cas, le rappel apparaît dans **Paramètres > Applications**, d'où il se désinstalle comme n'importe quelle
+application.
 
 ### macOS et Linux
 
@@ -42,7 +48,7 @@ Sous Windows, remplacer `python3` par `py`.
 | `python3 rappel_pause.py --test` | sonne et affiche le rappel **immédiatement** (vérification du son et de la fenêtre) |
 | `python3 rappel_pause.py --statut` | lancement automatique inscrit ou non, rappel en cours (PID), réglages, journal |
 | `python3 rappel_pause.py --installer --intervalle 90 --message "Bougez !"` | modifie les réglages (réinstallation sans risque, redémarre le rappel) |
-| `python3 rappel_pause.py --desinstaller` | arrête le rappel et supprime tout (Windows : `desinstaller_windows.bat`) |
+| `python3 rappel_pause.py --desinstaller` | arrête le rappel et supprime tout (Windows : Paramètres > Applications, ou `desinstaller_windows.bat`) |
 
 `--intervalle` est en minutes, décimales acceptées (`1,5`). Les réglages sont conservés dans `config.json` (dossier de
 données) ; après une modification à la main de ce fichier, relancer `--installer` pour les appliquer.
@@ -65,6 +71,7 @@ Le carillon est synthétisé par le programme : il est identique partout et ne d
 |---|---|---|---|
 | Dossier de données | `%LOCALAPPDATA%\RappelPause` | `~/Library/Application Support/RappelPause` | `~/.local/share/rappel-pause` |
 | Lancement automatique | registre `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, valeur `RappelPause` | agent `~/Library/LaunchAgents/local.rappel-pause.plist` | `~/.config/autostart/rappel-pause.desktop` |
+| Désinstallation | Paramètres > Applications (registre `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\RappelPause`) | `--desinstaller` | `--desinstaller` |
 | Fenêtre | boîte de dialogue Windows | boîte de dialogue macOS | zenity, kdialog, Tk ou notification |
 | Son | winsound | afplay | paplay, pw-play ou aplay |
 
@@ -75,7 +82,8 @@ le verrou `instance.lock` et le carillon `carillon.wav`.
 
 Le programme se compile en un exécutable autonome `RappelPause.exe` :
 
-- chaque exécution du workflow GitHub Actions **Rappel de pause** le produit (artefact `RappelPause-windows`) ;
+- chaque exécution du workflow GitHub Actions **Rappel de pause** le produit (artefact `RappelPause-windows`, à
+  télécharger en étant connecté à GitHub) ;
 - ou, sur un poste Windows disposant de Python :
   ```bat
   py -m pip install pyinstaller
@@ -83,11 +91,17 @@ Le programme se compile en un exécutable autonome `RappelPause.exe` :
   ```
   → `dist\RappelPause.exe`.
 
-Sur chaque poste, pour chaque utilisateur : `RappelPause.exe --installer` (compte rendu dans une fenêtre). Pour un
-script de connexion, une GPO ou Intune : `RappelPause.exe --installer --silencieux` (code de sortie 0 en cas de
-succès, 1 sinon ; la réinstallation est sans risque). Désinstallation : `RappelPause.exe --desinstaller`.
+Sur chaque poste, pour chaque utilisateur : **double-cliquer sur `RappelPause.exe`** et confirmer (ou
+`RappelPause.exe --installer`). Double-cliquer sur une version plus récente met l'installation à jour. Pour un script de
+connexion, une GPO ou Intune : `RappelPause.exe --installer --silencieux` (code de sortie 0 en cas de succès, 1 sinon ;
+la réinstallation est sans risque). Désinstallation : Paramètres > Applications > Rappel de pause active, ou
+`RappelPause.exe --desinstaller`.
 
-Un exécutable non signé déclenche SmartScreen, voire l'antivirus : le signer avec le certificat de l'organisation.
+Seul le fichier téléchargé pose la question « Installer ? » : la copie installée dans `%LOCALAPPDATA%\RappelPause`,
+lancée à chaque ouverture de session, fait tourner les rappels sans rien demander.
+
+Un exécutable non signé déclenche SmartScreen (« Windows a protégé votre ordinateur » : cliquer sur « Informations
+complémentaires » puis « Exécuter quand même »), voire l'antivirus : le signer avec le certificat de l'organisation.
 
 ## Dépannage
 

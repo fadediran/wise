@@ -54,31 +54,62 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check pyinstaller
           python -m PyInstaller --onefile --noconsole --name RappelPause rappel-pause/rappel_pause.py
-      - name: Installation, réinstallation et désinstallation réelles
+      - name: Installation, double-clic et désinstallation réels
         shell: pwsh
         run: |
-          $exe = "dist\RappelPause.exe"
-          function Lancer([string]$arguments) {
-            # WaitForExit n'attend que ce processus, pas le rappel qu'il laisse tourner.
-            $p = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru
-            $null = $p.Handle
-            $p.WaitForExit()
-            if ($p.ExitCode -ne 0) { throw "RappelPause.exe $arguments : code $($p.ExitCode)" }
-          }
+          $telecharge = (Resolve-Path "dist\RappelPause.exe").Path
           $dossier = Join-Path $env:LOCALAPPDATA "RappelPause"
+          $installe = Join-Path $dossier "RappelPause.exe"
           $run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-          Lancer "--version"
-          Lancer "--installer --silencieux"
-          Lancer "--installer --intervalle 90 --silencieux"
-          if (-not (Test-Path (Join-Path $dossier "RappelPause.exe"))) { throw "exécutable non installé" }
+          $applications = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\RappelPause"
+          function Demarrer([string]$programme, [string]$arguments) {
+            $options = @{ FilePath = $programme; PassThru = $true }
+            if ($arguments) { $options.ArgumentList = $arguments }
+            $p = Start-Process @options
+            $null = $p.Handle  # nécessaire pour lire ExitCode ensuite
+            return $p
+          }
+          function Lancer([string]$programme, [string]$arguments) {
+            # WaitForExit n'attend que ce processus, pas le rappel qu'il laisse tourner.
+            $p = Demarrer $programme $arguments
+            if (-not $p.WaitForExit(120000)) { throw "$programme $arguments : ne se termine pas" }
+            if ($p.ExitCode -ne 0) { throw "$programme $arguments : code $($p.ExitCode)" }
+          }
+
+          Lancer $telecharge "--version"
+          Lancer $telecharge "--installer --silencieux"
+          Lancer $telecharge "--installer --intervalle 90 --silencieux"
+          if (-not (Test-Path $installe)) { throw "exécutable non installé" }
           $commande = (Get-ItemProperty $run).RappelPause
           if ($commande -notlike "*\RappelPause\RappelPause.exe*") { throw "lancement automatique incorrect : $commande" }
           $config = Get-Content (Join-Path $dossier "config.json") -Raw | ConvertFrom-Json
           if ($config.intervalle_minutes -ne 90) { throw "configuration incorrecte" }
           if (-not (Get-Process -Name RappelPause -ErrorAction SilentlyContinue)) { throw "rappel non démarré" }
-          Lancer "--desinstaller --silencieux"
-          if (Test-Path $dossier) { throw "dossier non supprimé" }
+          $entree = Get-ItemProperty $applications
+          if ($entree.DisplayName -ne "Rappel de pause active") { throw "entrée de Paramètres > Applications absente" }
+          if ($entree.UninstallString -notlike "*\RappelPause\RappelPause.exe*--desinstaller") {
+            throw "commande de désinstallation incorrecte : $($entree.UninstallString)"
+          }
+
+          # Copie installée lancée sans argument (ouverture de session) : boucle de rappels, qui
+          # s'arrête aussitôt puisqu'une instance tourne déjà. Aucune question ne doit être posée.
+          Lancer $installe ""
+
+          # Double-clic sur le fichier téléchargé : il doit attendre la réponse à « Installer ? ».
+          # (S'il lançait la boucle de rappels, il s'arrêterait aussitôt : le verrou est pris.)
+          $p = Demarrer $telecharge ""
+          if ($p.WaitForExit(8000)) { throw "le double-clic n'a pas demandé de confirmation (code $($p.ExitCode))" }
+          Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+          Stop-Process -Id $p.Id -Force
+
+          # Bouton Désinstaller de Paramètres > Applications : c'est la copie installée qui s'exécute.
+          Lancer $installe "--desinstaller --silencieux"
+          if (Test-Path $applications) { throw "entrée de Paramètres > Applications non supprimée" }
           if ($null -ne (Get-ItemProperty $run).RappelPause) { throw "lancement automatique non supprimé" }
+          $limite = (Get-Date).AddSeconds(60)
+          while ((Test-Path $dossier) -and ((Get-Date) -lt $limite)) { Start-Sleep -Milliseconds 500 }
+          if (Test-Path $dossier) { throw "dossier non supprimé après la désinstallation" }
+          if (Get-Process -Name RappelPause -ErrorAction SilentlyContinue) { throw "processus RappelPause restant" }
       - uses: actions/upload-artifact@v4
         with:
           name: RappelPause-windows

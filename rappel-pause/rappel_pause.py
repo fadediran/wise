@@ -45,7 +45,7 @@ import time
 import wave
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 NOM_APPLI = "RappelPause"
 NOM_LISIBLE = "Rappel de pause active"
 TITRE_RAPPEL = "Pause active"
@@ -65,11 +65,14 @@ FICHIER_VERROU = "instance.lock"
 FICHIER_CARILLON = "carillon.wav"
 
 CLE_DEMARRAGE_WINDOWS = r"Software\Microsoft\Windows\CurrentVersion\Run"
+# Entrée de Paramètres > Applications (installations par utilisateur).
+CLE_DESINSTALLATION_WINDOWS = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\RappelPause"
 ETIQUETTE_LAUNCHD = "local.rappel-pause"
 FICHIER_DESKTOP = "rappel-pause.desktop"
 
-# Styles de MessageBoxW (winuser.h).
-MB_OK, MB_ICONINFORMATION, MB_SETFOREGROUND, MB_TOPMOST = 0x0, 0x40, 0x10000, 0x40000
+# Styles et réponses de MessageBoxW (winuser.h).
+MB_OK, MB_YESNO, MB_ICONQUESTION, MB_ICONINFORMATION = 0x0, 0x4, 0x20, 0x40
+MB_SETFOREGROUND, MB_TOPMOST, IDYES = 0x10000, 0x40000, 6
 
 # Windows : empêche l'ouverture d'une console pour chaque commande externe.
 _SANS_FENETRE = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -433,7 +436,8 @@ def jouer_son(fichier: Path | None) -> bool:
 # ------------------------------------------------------------------------------ affichage
 
 
-def _afficher_windows(titre: str, message: str) -> bool:
+def _boite_windows(titre: str, texte: str, styles: int) -> int:
+    """MessageBoxW au premier plan ; retourne le bouton choisi, 0 en cas d'échec."""
     import ctypes
     from ctypes import wintypes
 
@@ -445,10 +449,19 @@ def _afficher_windows(titre: str, message: str) -> bool:
     boite = user32.MessageBoxW
     boite.argtypes = (wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT)
     boite.restype = ctypes.c_int
-    if boite(None, message, titre, MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST) == 0:
+    reponse = boite(None, texte, titre, styles | MB_SETFOREGROUND | MB_TOPMOST)
+    if reponse == 0:
         journal.warning("MessageBoxW a échoué (erreur Windows %d).", ctypes.get_last_error())
-        return False
-    return True
+    return reponse
+
+
+def _afficher_windows(titre: str, message: str) -> bool:
+    return _boite_windows(titre, message, MB_OK | MB_ICONINFORMATION) != 0
+
+
+def demander_confirmation(titre: str, question: str) -> bool:
+    """Question Oui/Non au premier plan (Windows) ; False si la réponse est Non ou si rien ne s'affiche."""
+    return _boite_windows(titre, question, MB_YESNO | MB_ICONQUESTION) == IDYES
 
 
 # Titre, message et libellé du bouton sont passés en arguments (argv) :
@@ -659,6 +672,35 @@ def _demarrage_inscrit() -> str | None:
     return str(fichier) if fichier.exists() else None
 
 
+def _inscrire_desinstallation(commande: list, dossier: Path) -> None:
+    """Windows : entrée « Rappel de pause active » dans Paramètres > Applications, avec son bouton Désinstaller."""
+    import winreg
+
+    valeurs = {
+        "DisplayName": NOM_LISIBLE,
+        "DisplayVersion": VERSION,
+        "DisplayIcon": str(commande[0]),
+        "InstallLocation": str(dossier),
+        "UninstallString": subprocess.list2cmdline([str(argument) for argument in commande] + ["--desinstaller"]),
+    }
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, CLE_DESINSTALLATION_WINDOWS, 0, winreg.KEY_SET_VALUE) as cle:
+        for nom, valeur in valeurs.items():
+            winreg.SetValueEx(cle, nom, 0, winreg.REG_SZ, valeur)
+        for nom in ("NoModify", "NoRepair"):
+            winreg.SetValueEx(cle, nom, 0, winreg.REG_DWORD, 1)
+
+
+def _desinscrire_desinstallation() -> bool:
+    """Windows : retire l'entrée de Paramètres > Applications ; True si elle existait."""
+    import winreg
+
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, CLE_DESINSTALLATION_WINDOWS)
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _lancer_detache(commande: list) -> bool:
     """Lance la boucle de rappels en arrière-plan, indépendamment du terminal courant."""
     options: dict = {
@@ -752,6 +794,44 @@ def _copier_programme(dossier: Path) -> Path:
     return cible
 
 
+def _execute_depuis(dossier: Path) -> bool:
+    """Vrai si ce programme est l'exécutable autonome installé dans `dossier`."""
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        return Path(sys.executable).resolve().parent == dossier.resolve()
+    except OSError:
+        return False
+
+
+def _quitter_dossier_courant(dossier: Path) -> None:
+    """Sous Windows, le dossier courant d'un processus ne peut pas être supprimé : on en sort s'il y a lieu."""
+    try:
+        courant, cible = Path.cwd().resolve(), dossier.resolve()
+        if courant == cible or cible in courant.parents:
+            os.chdir(tempfile.gettempdir())
+    except OSError:
+        pass
+
+
+def _supprimer_apres_arret(dossier: Path) -> None:
+    """Windows : un exécutable en cours ne peut pas supprimer son propre fichier. Un cmd.exe détaché et
+    invisible retente la suppression chaque seconde (10 minutes au plus) jusqu'à la fin de ce programme."""
+    chemin = str(dossier)
+    boucle = (
+        f'for /l %i in (1,1,600) do (ping -n 2 127.0.0.1 >nul & rd /s /q "{chemin}" 2>nul'
+        f' & if not exist "{chemin}" exit)'
+    )
+    subprocess.Popen(
+        f'cmd.exe /d /s /c "{boucle}"',  # /s : cmd ne retire que les guillemets extérieurs
+        cwd=tempfile.gettempdir(),  # un dossier courant situé dans `dossier` empêcherait sa suppression
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=_SANS_FENETRE,
+    )
+
+
 def _est_python_microsoft_store() -> bool:
     return (
         plateforme() == "windows"
@@ -774,6 +854,8 @@ def installer(dossier: Path, reglages: dict) -> list:
     enregistrer_config(fichier_config, config)
     commande = commande_lancement(programme)
     emplacement = _inscrire_demarrage(commande)
+    if plateforme() == "windows":
+        _inscrire_desinstallation(commande, dossier)
     intervalle = formater_minutes(config["intervalle_minutes"])
     lignes = [
         f"{NOM_LISIBLE} installé pour l'utilisateur courant.",
@@ -800,7 +882,10 @@ def installer(dossier: Path, reglages: dict) -> list:
             "https://www.python.org puis relancez l'installation."
         )
     lignes.append(f"Tester maintenant : {_commande_affichable(_commande_console(programme) + ['--test'])}")
-    lignes.append(f"Désinstaller      : {_commande_affichable(_commande_console(programme) + ['--desinstaller'])}")
+    desinstallation = _commande_affichable(_commande_console(programme) + ["--desinstaller"])
+    if plateforme() == "windows":
+        desinstallation = f"Paramètres > Applications > {NOM_LISIBLE}, ou {desinstallation}"
+    lignes.append(f"Désinstaller      : {desinstallation}")
     return lignes
 
 
@@ -810,16 +895,66 @@ def desinstaller(dossier: Path) -> list:
     lignes = []
     if _desinscrire_demarrage():
         lignes.append("Lancement automatique supprimé.")
+    if plateforme() == "windows" and _desinscrire_desinstallation():
+        lignes.append("Entrée retirée de Paramètres > Applications.")
     if arreter_instance(dossier):
         lignes.append("Rappel en cours arrêté.")
     if dossier.exists():
-        try:
-            _reessayer(lambda: dossier.exists() and shutil.rmtree(str(dossier)))
-            lignes.append(f"Dossier supprimé : {dossier}")
-        except OSError as exc:
-            lignes.append(f"Suppression incomplète de {dossier} ({exc}) : supprimez-le manuellement.")
+        _quitter_dossier_courant(dossier)
+        if plateforme() == "windows" and _execute_depuis(dossier):
+            # Désinstallation lancée depuis la copie installée (bouton Désinstaller de Paramètres).
+            _supprimer_apres_arret(dossier)
+            lignes.append(f"Dossier {dossier} : supprimé dès la fermeture de ce programme.")
+        else:
+            try:
+                _reessayer(lambda: dossier.exists() and shutil.rmtree(str(dossier)))
+                lignes.append(f"Dossier supprimé : {dossier}")
+            except OSError as exc:
+                lignes.append(f"Suppression incomplète de {dossier} ({exc}) : supprimez-le manuellement.")
     lignes.insert(0, f"{NOM_LISIBLE} désinstallé." if lignes else f"{NOM_LISIBLE} n'était pas installé.")
     return lignes
+
+
+def _lance_par_double_clic(argv: list) -> bool:
+    """Exécutable Windows ouvert sans argument hors de son dossier d'installation : le fichier téléchargé.
+
+    La copie installée, elle, est lancée sans argument à l'ouverture de session : elle fait tourner les rappels.
+    """
+    return (
+        not argv
+        and plateforme() == "windows"
+        and bool(getattr(sys, "frozen", False))
+        and not _execute_depuis(dossier_donnees())
+    )
+
+
+def installer_par_double_clic(dossier: Path) -> int:
+    """Double-clic sur RappelPause.exe : demande de confirmation, installation, puis compte rendu en fenêtre."""
+    configurer_journal()
+    config = charger_config(dossier / FICHIER_CONFIG)
+    intervalle = formater_minutes(config["intervalle_minutes"])
+    action = "Mettre à jour" if _demarrage_inscrit() else "Installer"
+    question = (
+        f"{action} le rappel de pause active ?\n\n"
+        f"Toutes les {intervalle}, l'ordinateur sonnera puis affichera :\n"
+        f"«\u00a0{config['message']}\u00a0»\n\n"
+        "Il démarrera automatiquement à chaque ouverture de session "
+        "(utilisateur courant, sans droits administrateur)."
+    )
+    if not demander_confirmation(NOM_LISIBLE, question):
+        return 0
+    try:
+        installer(dossier, {})
+    except Exception as exc:  # pas de console : toute erreur doit apparaître dans une fenêtre
+        afficher_message(NOM_LISIBLE, f"L'installation a échoué : {exc}")
+        return 1
+    afficher_message(
+        NOM_LISIBLE,
+        f"{NOM_LISIBLE} installé.\n\n"
+        f"Première sonnerie dans {intervalle}, puis toutes les {intervalle} après la fermeture du message.\n\n"
+        f"Pour le désinstaller : Paramètres > Applications > {NOM_LISIBLE}.",
+    )
+    return 0
 
 
 def statut(dossier: Path) -> list:
@@ -965,8 +1100,12 @@ def analyser_arguments(argv: list | None = None) -> argparse.Namespace:
 
 
 def main(argv: list | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
     arguments = analyser_arguments(argv)
     dossier = dossier_donnees()
+    if _lance_par_double_clic(argv):
+        return installer_par_double_clic(dossier)
     reglages = {}
     if arguments.intervalle is not None:
         reglages["intervalle_minutes"] = arguments.intervalle

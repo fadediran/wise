@@ -67,6 +67,31 @@ def attendre_texte(fichier: Path, texte: str, delai_s: float = 60.0) -> bool:
     return False
 
 
+# Clés de registre de test (Windows) : les tests ne touchent jamais aux vraies clés.
+CLE_TEST_DEMARRAGE = r"Software\RappelPauseTests\Run"
+CLE_TEST_DESINSTALLATION = r"Software\RappelPauseTests\Desinstallation"
+
+
+def nettoyer_cles_de_test() -> None:
+    import winreg
+
+    for cle in (CLE_TEST_DEMARRAGE, CLE_TEST_DESINSTALLATION, r"Software\RappelPauseTests"):
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, cle)
+        except FileNotFoundError:
+            pass
+
+
+def valeur_registre(cle: str, nom: str):
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, cle) as ouverte:
+            return winreg.QueryValueEx(ouverte, nom)[0]
+    except FileNotFoundError:
+        return None
+
+
 # ------------------------------------------------------------------------- configuration
 
 
@@ -472,6 +497,20 @@ class TestLancementAutomatique(TestTemporaire):
         with self.assertRaises(PermissionError):
             rp._reessayer(mock.Mock(side_effect=PermissionError("toujours utilisé")), delai_s=0.3)
 
+    def test_desinstallation_depuis_le_dossier_installe(self) -> None:
+        # Le programme de désinstallation peut être lancé avec le dossier d'installation comme dossier courant.
+        dossier = self.tmp / "rappel-pause"
+        (dossier / "sous-dossier").mkdir(parents=True)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(str(dossier / "sous-dossier"))
+        with mock.patch.object(rp, "plateforme", return_value="linux"), mock.patch.object(
+            rp, "_desinscrire_demarrage", return_value=False
+        ), mock.patch.object(rp, "arreter_instance", return_value=False):
+            lignes = rp.desinstaller(dossier)
+        self.assertFalse(dossier.exists())
+        self.assertIn(f"Dossier supprimé : {dossier}", lignes)
+        self.assertEqual(Path(os.getcwd()).resolve(), Path(tempfile.gettempdir()).resolve())
+
     def test_garde_fou_dossier(self) -> None:
         for dossier in (Path("RappelPause"), self.tmp, self.tmp / "autre"):
             with self.subTest(dossier=dossier), self.assertRaises(RuntimeError):
@@ -507,25 +546,33 @@ class TestLancementAutomatique(TestTemporaire):
 
     @unittest.skipUnless(sys.platform == "win32", "registre (Windows)")
     def test_inscription_windows_registre(self) -> None:
-        import winreg
-
-        cle_test = r"Software\RappelPauseTests\Run"
-
-        def nettoyer() -> None:
-            for cle in (cle_test, r"Software\RappelPauseTests"):
-                try:
-                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, cle)
-                except FileNotFoundError:
-                    pass
-
-        self.addCleanup(nettoyer)
+        self.addCleanup(nettoyer_cles_de_test)
         commande = [r"C:\Program Files\Python\pythonw.exe", r"C:\Users\Jean Dupont\AppData\Local\RappelPause\rappel_pause.py"]
-        with mock.patch.object(rp, "CLE_DEMARRAGE_WINDOWS", cle_test):
+        with mock.patch.object(rp, "CLE_DEMARRAGE_WINDOWS", CLE_TEST_DEMARRAGE):
             rp._inscrire_demarrage(commande)
             self.assertEqual(rp._demarrage_inscrit(), subprocess.list2cmdline(commande))
             self.assertTrue(rp._desinscrire_demarrage())
             self.assertIsNone(rp._demarrage_inscrit())
             self.assertFalse(rp._desinscrire_demarrage())
+
+    @unittest.skipUnless(sys.platform == "win32", "registre (Windows)")
+    def test_entree_applications_installees(self) -> None:
+        self.addCleanup(nettoyer_cles_de_test)
+        dossier = Path(r"C:\Users\Jean Dupont\AppData\Local\RappelPause")
+        with mock.patch.object(rp, "CLE_DESINSTALLATION_WINDOWS", CLE_TEST_DESINSTALLATION):
+            rp._inscrire_desinstallation([str(dossier / "RappelPause.exe")], dossier)
+
+            def valeur(nom: str):
+                return valeur_registre(CLE_TEST_DESINSTALLATION, nom)
+
+            self.assertEqual(valeur("DisplayName"), rp.NOM_LISIBLE)
+            self.assertEqual(valeur("DisplayVersion"), rp.VERSION)
+            self.assertEqual(valeur("InstallLocation"), str(dossier))
+            self.assertEqual(valeur("UninstallString"), f'"{dossier}\\RappelPause.exe" --desinstaller')
+            self.assertEqual((valeur("NoModify"), valeur("NoRepair")), (1, 1))
+            self.assertTrue(rp._desinscrire_desinstallation())
+            self.assertIsNone(valeur("DisplayName"))
+            self.assertFalse(rp._desinscrire_desinstallation())
 
     @unittest.skipIf(sys.platform == "win32", "launchctl (POSIX)")
     def test_chargement_launchd_reessaie(self) -> None:
@@ -533,6 +580,113 @@ class TestLancementAutomatique(TestTemporaire):
         with mock.patch.object(rp, "_executer", executer), mock.patch.object(rp.time, "sleep"):
             self.assertTrue(rp._charger_agent_launchd())
         self.assertEqual(executer.call_args[0][0], ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(rp.chemin_plist())])
+
+
+# ------------------------------------------------------------- RappelPause.exe (simulé)
+
+
+class TestExecutableWindows(TestTemporaire):
+    """Double-clic et désinstallation de l'exécutable autonome, simulés sur tous les systèmes."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.dossier = self.tmp / "RappelPause"
+        telecharge = self.tmp / "Téléchargements" / "RappelPause.exe"
+        for correctif in (
+            mock.patch.object(rp, "plateforme", return_value="windows"),
+            mock.patch.object(rp, "dossier_donnees", return_value=self.dossier),
+            mock.patch.object(sys, "frozen", True, create=True),
+            mock.patch.object(sys, "executable", str(telecharge)),
+        ):
+            correctif.start()
+            self.addCleanup(correctif.stop)
+
+    def test_double_clic_sur_le_fichier_telecharge(self) -> None:
+        self.assertTrue(rp._lance_par_double_clic([]))
+        self.assertFalse(rp._lance_par_double_clic(["--installer"]))  # ligne de commande explicite
+        with mock.patch.object(rp, "installer_par_double_clic", return_value=0) as double_clic:
+            self.assertEqual(rp.main([]), 0)
+        double_clic.assert_called_once_with(self.dossier)
+
+    def test_copie_installee_lancee_a_l_ouverture_de_session(self) -> None:
+        self.dossier.mkdir()
+        with mock.patch.object(sys, "executable", str(self.dossier / "RappelPause.exe")):
+            self.assertTrue(rp._execute_depuis(self.dossier))
+            self.assertFalse(rp._lance_par_double_clic([]))  # boucle de rappels, sans question
+
+    def test_script_et_autres_systemes_non_concernes(self) -> None:
+        with mock.patch.object(sys, "frozen", False):
+            self.assertFalse(rp._execute_depuis(self.dossier))
+            self.assertFalse(rp._lance_par_double_clic([]))
+        with mock.patch.object(rp, "plateforme", return_value="macos"):
+            self.assertFalse(rp._lance_par_double_clic([]))
+
+    def double_clic(self, reponse: bool, installation=None, deja_installe=None):
+        simulacres = {
+            "demander_confirmation": mock.Mock(return_value=reponse),
+            "afficher_message": mock.Mock(return_value=True),
+            "installer": installation or mock.Mock(return_value=["compte rendu"]),
+            "_demarrage_inscrit": mock.Mock(return_value=deja_installe),
+        }
+        for nom, simulacre in simulacres.items():
+            correctif = mock.patch.object(rp, nom, simulacre)
+            correctif.start()
+            self.addCleanup(correctif.stop)
+        return rp.installer_par_double_clic(self.dossier), simulacres
+
+    def test_double_clic_refuse(self) -> None:
+        code, simulacres = self.double_clic(False)
+        self.assertEqual(code, 0)
+        question = simulacres["demander_confirmation"].call_args[0][1]
+        self.assertTrue(question.startswith("Installer le rappel de pause active ?"), question)
+        self.assertIn("Toutes les 2 h", question)
+        self.assertIn(rp.MESSAGE_DEFAUT, question)
+        simulacres["installer"].assert_not_called()
+        simulacres["afficher_message"].assert_not_called()
+
+    def test_double_clic_accepte(self) -> None:
+        code, simulacres = self.double_clic(True)
+        self.assertEqual(code, 0)
+        simulacres["installer"].assert_called_once_with(self.dossier, {})
+        compte_rendu = simulacres["afficher_message"].call_args[0][1]
+        self.assertTrue(compte_rendu.startswith(f"{rp.NOM_LISIBLE} installé."), compte_rendu)
+        self.assertIn("Première sonnerie dans 2 h", compte_rendu)
+        self.assertIn("Paramètres > Applications", compte_rendu)
+
+    def test_double_clic_mise_a_jour(self) -> None:
+        _, simulacres = self.double_clic(False, deja_installe=r"C:\...\RappelPause.exe")
+        self.assertTrue(simulacres["demander_confirmation"].call_args[0][1].startswith("Mettre à jour"))
+
+    def test_double_clic_echec_affiche(self) -> None:
+        code, simulacres = self.double_clic(True, installation=mock.Mock(side_effect=OSError("disque plein")))
+        self.assertEqual(code, 1)
+        self.assertEqual(simulacres["afficher_message"].call_args[0][1], "L'installation a échoué : disque plein")
+
+    def test_desinstallation_depuis_la_copie_installee(self) -> None:
+        # Bouton Désinstaller de Paramètres > Applications : c'est la copie installée qui s'exécute.
+        self.dossier.mkdir()
+        (self.dossier / rp.FICHIER_CONFIG).write_text("{}", encoding="utf-8")
+        with mock.patch.object(sys, "executable", str(self.dossier / "RappelPause.exe")), mock.patch.object(
+            rp, "_desinscrire_demarrage", return_value=True
+        ), mock.patch.object(rp, "_desinscrire_desinstallation", return_value=True), mock.patch.object(
+            rp, "arreter_instance", return_value=True
+        ), mock.patch.object(rp, "_supprimer_apres_arret") as suppression:
+            lignes = rp.desinstaller(self.dossier)
+        suppression.assert_called_once_with(self.dossier)
+        self.assertTrue(self.dossier.exists())  # supprimé par cmd.exe après la fin du programme
+        self.assertIn("Entrée retirée de Paramètres > Applications.", lignes)
+        self.assertIn(f"Dossier {self.dossier} : supprimé dès la fermeture de ce programme.", lignes)
+
+    def test_commande_de_suppression_differee(self) -> None:
+        chemin = r"C:\Users\Jean & Fils (Bureau)\AppData\Local\RappelPause"
+        with mock.patch.object(rp.subprocess, "Popen") as popen:
+            rp._supprimer_apres_arret(Path(chemin))
+        commande = popen.call_args[0][0]
+        self.assertTrue(commande.startswith('cmd.exe /d /s /c "for /l %i in (1,1,600) do ('), commande)
+        self.assertEqual(commande.count(f'"{chemin}"'), 2)  # rd et if not exist, chemin entre guillemets
+        self.assertIn(f'rd /s /q "{chemin}"', commande)
+        self.assertTrue(commande.endswith(' exit)"'), commande)
+        self.assertEqual(popen.call_args[1]["cwd"], tempfile.gettempdir())
 
 
 # --------------------------------------------------------------------------- intégration
@@ -552,8 +706,11 @@ class TestIntegration(TestTemporaire):
                 mock.patch.object(rp, "_demarrer", rp._lancer_detache),
             ]
         if sys.platform == "win32":
-            correctifs.append(mock.patch.object(rp, "CLE_DEMARRAGE_WINDOWS", r"Software\RappelPauseTests\Run"))
-            self.addCleanup(self.nettoyer_registre)
+            correctifs += [
+                mock.patch.object(rp, "CLE_DEMARRAGE_WINDOWS", CLE_TEST_DEMARRAGE),
+                mock.patch.object(rp, "CLE_DESINSTALLATION_WINDOWS", CLE_TEST_DESINSTALLATION),
+            ]
+            self.addCleanup(nettoyer_cles_de_test)
         for correctif in correctifs:
             correctif.start()
             self.addCleanup(correctif.stop)
@@ -564,16 +721,6 @@ class TestIntegration(TestTemporaire):
     def desinstaller_si_besoin(self) -> None:
         if self.dossier.exists() or rp._demarrage_inscrit():
             rp.desinstaller(self.dossier)
-
-    @staticmethod
-    def nettoyer_registre() -> None:
-        import winreg
-
-        for cle in (r"Software\RappelPauseTests\Run", r"Software\RappelPauseTests"):
-            try:
-                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, cle)
-            except FileNotFoundError:
-                pass
 
     def installer(self, reglages: dict) -> str:
         with warnings.catch_warnings():
@@ -586,6 +733,8 @@ class TestIntegration(TestTemporaire):
         self.assertIn("Le rappel est actif : première sonnerie dans 2 h.", compte_rendu)
         self.assertTrue((self.dossier / "rappel_pause.py").is_file())
         self.assertIsNotNone(rp._demarrage_inscrit())
+        if sys.platform == "win32":  # entrée de Paramètres > Applications
+            self.assertIn("--desinstaller", valeur_registre(CLE_TEST_DESINSTALLATION, "UninstallString"))
         premier_pid = rp.instance_en_cours(self.dossier)
         self.assertGreater(premier_pid or 0, 0)
 
@@ -605,6 +754,8 @@ class TestIntegration(TestTemporaire):
         self.assertIn("désinstallé", compte_rendu)
         self.assertFalse(self.dossier.exists())
         self.assertIsNone(rp._demarrage_inscrit())
+        if sys.platform == "win32":
+            self.assertIsNone(valeur_registre(CLE_TEST_DESINSTALLATION, "UninstallString"))
         self.assertIn("n'était pas installé", "\n".join(rp.desinstaller(self.dossier)))
 
     def test_la_boucle_declenche_les_rappels(self) -> None:
