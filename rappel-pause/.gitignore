@@ -1,0 +1,5 @@
+__pycache__/
+# Sorties de PyInstaller
+build/
+dist/
+*.spec

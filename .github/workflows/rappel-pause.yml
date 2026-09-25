@@ -1,0 +1,86 @@
+name: Rappel de pause
+
+on:
+  push:
+    paths:
+      - "rappel-pause/**"
+      - ".github/workflows/rappel-pause.yml"
+  pull_request:
+    paths:
+      - "rappel-pause/**"
+      - ".github/workflows/rappel-pause.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.x"]
+        include:
+          # Version minimale prise en charge.
+          - os: ubuntu-22.04
+            python: "3.8"
+          - os: windows-latest
+            python: "3.8"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Tests unitaires et d'intégration
+        env:
+          RAPPEL_PAUSE_TESTS_INTEGRATION: "1"
+        run: python -m unittest discover -s rappel-pause/tests -v
+
+  executable-windows:
+    name: Exécutable Windows autonome
+    needs: tests
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Construction avec PyInstaller
+        run: |
+          python -m pip install --disable-pip-version-check pyinstaller
+          python -m PyInstaller --onefile --noconsole --name RappelPause rappel-pause/rappel_pause.py
+      - name: Installation, réinstallation et désinstallation réelles
+        shell: pwsh
+        run: |
+          $exe = "dist\RappelPause.exe"
+          function Lancer([string]$arguments) {
+            # WaitForExit n'attend que ce processus, pas le rappel qu'il laisse tourner.
+            $p = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru
+            $null = $p.Handle
+            $p.WaitForExit()
+            if ($p.ExitCode -ne 0) { throw "RappelPause.exe $arguments : code $($p.ExitCode)" }
+          }
+          $dossier = Join-Path $env:LOCALAPPDATA "RappelPause"
+          $run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          Lancer "--version"
+          Lancer "--installer --silencieux"
+          Lancer "--installer --intervalle 90 --silencieux"
+          if (-not (Test-Path (Join-Path $dossier "RappelPause.exe"))) { throw "exécutable non installé" }
+          $commande = (Get-ItemProperty $run).RappelPause
+          if ($commande -notlike "*\RappelPause\RappelPause.exe*") { throw "lancement automatique incorrect : $commande" }
+          $config = Get-Content (Join-Path $dossier "config.json") -Raw | ConvertFrom-Json
+          if ($config.intervalle_minutes -ne 90) { throw "configuration incorrecte" }
+          if (-not (Get-Process -Name RappelPause -ErrorAction SilentlyContinue)) { throw "rappel non démarré" }
+          Lancer "--desinstaller --silencieux"
+          if (Test-Path $dossier) { throw "dossier non supprimé" }
+          if ($null -ne (Get-ItemProperty $run).RappelPause) { throw "lancement automatique non supprimé" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RappelPause-windows
+          path: dist/RappelPause.exe
+          if-no-files-found: error
