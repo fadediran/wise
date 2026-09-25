@@ -10,6 +10,11 @@ on:
       - "rappel-pause/**"
       - ".github/workflows/rappel-pause.yml"
   workflow_dispatch:
+    inputs:
+      publier_release:
+        description: "Publier RappelPause.exe dans une pré-release GitHub"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -115,3 +120,37 @@ jobs:
           name: RappelPause-windows
           path: dist/RappelPause.exe
           if-no-files-found: error
+
+  publier-release:
+    name: Publication de la pré-release
+    needs: executable-windows
+    # Uniquement sur déclenchement manuel explicite, jamais à chaque push.
+    if: github.event_name == 'workflow_dispatch' && inputs.publier_release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write  # seul ce job peut créer la release et son tag
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: RappelPause-windows
+          path: dist
+      - name: Création ou mise à jour de la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python3 rappel-pause/rappel_pause.py --version | cut -d' ' -f2)
+          tag="v${version}"
+          empreinte=$(sha256sum dist/RappelPause.exe | cut -d' ' -f1)
+          notes="Version de test de RappelPause.exe (Windows 10/11, sans Python) : double-cliquer sur le fichier puis répondre Oui pour l'installer. Désinstallation : Paramètres > Applications. Documentation : rappel-pause/README.md.
+
+          SHA-256 de RappelPause.exe : ${empreinte}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/RappelPause.exe --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$tag" --notes "$notes" --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" dist/RappelPause.exe --target "$GITHUB_SHA" --prerelease \
+              --title "Rappel de pause active ${version}" --notes "$notes" --repo "$GITHUB_REPOSITORY"
+          fi
+          echo "Release ${tag} : SHA-256 ${empreinte}"

@@ -82,7 +82,10 @@ le verrou `instance.lock` et le carillon `carillon.wav`.
 
 Le programme se compile en un exécutable autonome `RappelPause.exe` :
 
-- chaque exécution du workflow GitHub Actions **Rappel de pause** le produit (artefact `RappelPause-windows`, à
+- les [releases du dépôt](https://github.com/fadediran/wise/releases) le proposent en téléchargement public, sans
+  connexion à GitHub. Pour en publier une : lancer manuellement le workflow **Rappel de pause** (onglet Actions) en
+  cochant « Publier RappelPause.exe dans une pré-release GitHub » ; l'empreinte SHA-256 figure dans les notes ;
+- chaque exécution du workflow GitHub Actions **Rappel de pause** le produit aussi (artefact `RappelPause-windows`, à
   télécharger en étant connecté à GitHub) ;
 - ou, sur un poste Windows disposant de Python :
   ```bat
