@@ -9,7 +9,9 @@ Ce qu'il sait faire :
 - répondre en français, de façon directe et chaleureuse ;
 - chercher sur le web pour l'actualité ou les chiffres récents, en citant ses sources ;
 - donner la date et l'heure exactes ;
-- se souvenir de vous d'une conversation à l'autre (prénom, métier, projets, préférences).
+- se souvenir de vous d'une conversation à l'autre (prénom, métier, projets, préférences) ;
+- évoluer comme vous le voulez : dites-lui « tutoie-moi », « sois plus bref » ou « ajoute un
+  peu d'humour », et il ajuste sa personnalité pour toutes les conversations suivantes.
 
 ## Installation
 
@@ -52,12 +54,14 @@ python wise.py
 | `/aide`    | affiche l'aide                                |
 | `/memoire` | montre ce que Wise a retenu sur vous          |
 | `/oublier` | efface toute sa mémoire                       |
+| `/ajustements` | montre les ajustements de personnalité demandés |
+| `/retablir` | annule ces ajustements (retour à `personnalite.md`) |
 | `/nouveau` | commence une nouvelle conversation            |
 | `/quitter` | quitte Wise (Ctrl+C marche aussi)             |
 
 La mémoire est enregistrée dans `~/.wise/memoire.json` (sous Windows :
-`C:\Users\<vous>\.wise\memoire.json`). C'est un simple fichier texte que vous pouvez lire ou
-modifier.
+`C:\Users\<vous>\.wise\memoire.json`). Les ajustements de personnalité sont à côté, dans
+`ajustements.json`. Ce sont de simples fichiers texte que vous pouvez lire ou modifier.
 
 ## Réglages facultatifs
 
@@ -66,7 +70,7 @@ Variables d'environnement :
 - `WISE_MODELE` : le modèle Claude utilisé (par défaut `claude-opus-5-5`) ;
 - `WISE_EFFORT` : `low`, `medium` (par défaut) ou `high`. Plus bas, Wise répond plus vite et
   coûte moins cher ; plus haut, il réfléchit davantage ;
-- `WISE_MEMOIRE` : un autre emplacement pour le fichier de mémoire.
+- `WISE_MEMOIRE` et `WISE_AJUSTEMENTS` : d'autres emplacements pour ces deux fichiers.
 
 Si Claude refuse une demande pour des raisons de sécurité, l'API la confie automatiquement à un
 autre modèle Claude (option « fallbacks ») avant d'abandonner.

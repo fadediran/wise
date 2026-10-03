@@ -19,6 +19,8 @@ except ImportError:  # pragma: no cover - message pour l'utilisateur
 DOSSIER = Path(__file__).resolve().parent
 FICHIER_PERSONNALITE = DOSSIER / "personnalite.md"
 FICHIER_MEMOIRE = Path(os.environ.get("WISE_MEMOIRE", Path.home() / ".wise" / "memoire.json"))
+FICHIER_AJUSTEMENTS = Path(os.environ.get("WISE_AJUSTEMENTS",
+                                          Path.home() / ".wise" / "ajustements.json"))
 
 MODELE = os.environ.get("WISE_MODELE", "claude-opus-5-5")
 EFFORT = os.environ.get("WISE_EFFORT", "medium")
@@ -30,11 +32,13 @@ MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
         "août", "septembre", "octobre", "novembre", "décembre"]
 
 AIDE = """Commandes :
-  /aide      affiche cette aide
-  /memoire   montre ce que Wise a retenu sur vous
-  /oublier   efface toute la mémoire de Wise
-  /nouveau   commence une nouvelle conversation
-  /quitter   quitte Wise (ou Ctrl+C)"""
+  /aide         affiche cette aide
+  /memoire      montre ce que Wise a retenu sur vous
+  /oublier      efface toute la mémoire de Wise
+  /ajustements  montre comment vous avez ajusté sa personnalité
+  /retablir     annule tous les ajustements de personnalité
+  /nouveau      commence une nouvelle conversation
+  /quitter      quitte Wise (ou Ctrl+C)"""
 
 OUTILS = [
     {"type": "web_search_20260209", "name": "web_search", "max_uses": 5},
@@ -61,24 +65,64 @@ OUTILS = [
         },
         "eager_input_streaming": True,
     },
+    {
+        "name": "ajuster_personnalite",
+        "description": (
+            "Modifie durablement ta propre façon d'être quand l'utilisateur te le demande "
+            "(ton, longueur des réponses, tutoiement, humour, centres d'intérêt…). La consigne "
+            "s'applique dès maintenant et dans toutes les conversations suivantes. Si elle "
+            "contredit ou précise un ajustement existant, indique celui-ci dans « remplace »."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "consigne": {
+                    "type": "string",
+                    "description": "La nouvelle consigne, à la deuxième personne (ex. « Tu tutoies l'utilisateur. »).",
+                },
+                "remplace": {
+                    "type": "string",
+                    "description": "Le texte exact d'un ajustement existant à remplacer, s'il y en a un.",
+                },
+            },
+            "required": ["consigne"],
+            "additionalProperties": False,
+        },
+        "eager_input_streaming": True,
+    },
 ]
 
 
-# --- Mémoire ---------------------------------------------------------------
+# --- Mémoire et ajustements (listes de phrases dans des fichiers JSON) ------
 
-def charger_memoire(fichier=None):
-    fichier = Path(fichier or FICHIER_MEMOIRE)
+def charger_liste(fichier):
     try:
-        donnees = json.loads(fichier.read_text(encoding="utf-8"))
+        donnees = json.loads(Path(fichier).read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return []
     return [str(x) for x in donnees] if isinstance(donnees, list) else []
 
 
-def sauver_memoire(souvenirs, fichier=None):
-    fichier = Path(fichier or FICHIER_MEMOIRE)
+def sauver_liste(elements, fichier):
+    fichier = Path(fichier)
     fichier.parent.mkdir(parents=True, exist_ok=True)
-    fichier.write_text(json.dumps(souvenirs, ensure_ascii=False, indent=2), encoding="utf-8")
+    fichier.write_text(json.dumps(elements, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def charger_memoire(fichier=None):
+    return charger_liste(fichier or FICHIER_MEMOIRE)
+
+
+def sauver_memoire(souvenirs, fichier=None):
+    sauver_liste(souvenirs, fichier or FICHIER_MEMOIRE)
+
+
+def charger_ajustements(fichier=None):
+    return charger_liste(fichier or FICHIER_AJUSTEMENTS)
+
+
+def sauver_ajustements(ajustements, fichier=None):
+    sauver_liste(ajustements, fichier or FICHIER_AJUSTEMENTS)
 
 
 # --- Outils exécutés sur l'ordinateur -------------------------------------
@@ -101,7 +145,24 @@ def outil_memoriser(entree, fichier=None):
     return "Information enregistrée."
 
 
-def executer_outil(bloc, fichier_memoire=None):
+def outil_ajuster_personnalite(entree, fichier=None):
+    consigne = entree.get("consigne") if isinstance(entree, dict) else None
+    if not isinstance(consigne, str) or not consigne.strip():
+        raise ValueError("le champ « consigne » doit être un texte non vide")
+    consigne = consigne.strip()
+    remplace = entree.get("remplace")
+    ajustements = charger_ajustements(fichier)
+    if isinstance(remplace, str) and remplace.strip():
+        if remplace.strip() not in ajustements:
+            raise ValueError("l'ajustement à remplacer n'existe pas ; recopie-le exactement")
+        ajustements.remove(remplace.strip())
+    if consigne not in ajustements:
+        ajustements.append(consigne)
+    sauver_ajustements(ajustements, fichier)
+    return "Ajustement enregistré. Applique-le dès ta prochaine phrase."
+
+
+def executer_outil(bloc, fichier_memoire=None, fichier_ajustements=None):
     """Exécute un appel d'outil et renvoie le bloc tool_result correspondant."""
     try:
         if bloc.name == "date_heure":
@@ -109,6 +170,9 @@ def executer_outil(bloc, fichier_memoire=None):
         elif bloc.name == "memoriser":
             contenu = outil_memoriser(bloc.input, fichier_memoire)
             print("  (Wise a mémorisé une information)")
+        elif bloc.name == "ajuster_personnalite":
+            contenu = outil_ajuster_personnalite(bloc.input, fichier_ajustements)
+            print(f"  (Wise a ajusté sa personnalité : {bloc.input['consigne'].strip()})")
         else:
             raise ValueError(f"outil inconnu : {bloc.name}")
         return {"type": "tool_result", "tool_use_id": bloc.id, "content": contenu}
@@ -119,8 +183,12 @@ def executer_outil(bloc, fichier_memoire=None):
 
 # --- Conversation ----------------------------------------------------------
 
-def construire_systeme(souvenirs):
+def construire_systeme(souvenirs, ajustements=()):
     systeme = FICHIER_PERSONNALITE.read_text(encoding="utf-8").strip()
+    if ajustements:
+        systeme += ("\n\n## Ajustements demandés par l'utilisateur\n\n"
+                    "Ils priment sur le reste de ta personnalité en cas de conflit.\n\n")
+        systeme += "\n".join(f"- {a}" for a in ajustements)
     if souvenirs:
         systeme += "\n\n## Ce que tu sais déjà sur l'utilisateur\n\n"
         systeme += "\n".join(f"- {s}" for s in souvenirs)
@@ -152,14 +220,16 @@ def contenu_a_renvoyer(contenu):
 
 
 class Wise:
-    def __init__(self, client, fichier_memoire=None):
+    def __init__(self, client, fichier_memoire=None, fichier_ajustements=None):
         self.client = client
         self.fichier_memoire = fichier_memoire
+        self.fichier_ajustements = fichier_ajustements
         self.nouvelle_conversation()
 
     def nouvelle_conversation(self):
         self.messages = []
-        self.systeme = construire_systeme(charger_memoire(self.fichier_memoire))
+        self.systeme = construire_systeme(charger_memoire(self.fichier_memoire),
+                                          charger_ajustements(self.fichier_ajustements))
 
     def _appel(self):
         """Un appel à l'API, en flux : le texte s'affiche au fur et à mesure."""
@@ -200,7 +270,8 @@ class Wise:
                 if reponse.stop_reason == "tool_use":
                     appels = [b for b in reponse.content if b.type == "tool_use"]
                     self.messages.append({"role": "user", "content": [
-                        executer_outil(b, self.fichier_memoire) for b in appels]})
+                        executer_outil(b, self.fichier_memoire, self.fichier_ajustements)
+                        for b in appels]})
                     continue
                 if reponse.stop_reason == "pause_turn" and reprises < MAX_REPRISES:
                     reprises += 1
@@ -269,6 +340,16 @@ def main():
             sauver_memoire([])
             wise.nouvelle_conversation()
             print("Mémoire effacée. Nouvelle conversation.")
+            continue
+        if commande == "/ajustements":
+            ajustements = charger_ajustements()
+            print("\n".join(f"- {a}" for a in ajustements) if ajustements
+                  else "Aucun ajustement : Wise suit personnalite.md tel quel.")
+            continue
+        if commande == "/retablir":
+            sauver_ajustements([])
+            wise.nouvelle_conversation()
+            print("Ajustements annulés. Nouvelle conversation.")
             continue
         if commande == "/nouveau":
             wise.nouvelle_conversation()

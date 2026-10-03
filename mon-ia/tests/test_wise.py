@@ -55,12 +55,13 @@ class TestWise(unittest.TestCase):
     def setUp(self):
         self.dossier = tempfile.TemporaryDirectory()
         self.memoire = Path(self.dossier.name) / "memoire.json"
+        self.ajustements = Path(self.dossier.name) / "ajustements.json"
 
     def tearDown(self):
         self.dossier.cleanup()
 
     def discuter(self, client, texte):
-        assistant = wise.Wise(client, self.memoire)
+        assistant = wise.Wise(client, self.memoire, self.ajustements)
         with contextlib.redirect_stdout(io.StringIO()) as sortie:
             assistant.repondre(texte)
         return assistant, sortie.getvalue()
@@ -97,6 +98,30 @@ class TestWise(unittest.TestCase):
         resultat = wise.executer_outil(appel, self.memoire)
         self.assertTrue(resultat["is_error"])
         self.assertEqual(wise.charger_memoire(self.memoire), [])
+
+    def test_ajuster_personnalite(self):
+        appel = BetaToolUseBlock(type="tool_use", id="t1", name="ajuster_personnalite",
+                                 input={"consigne": "Tu tutoies l'utilisateur."})
+        client = FauxClient([
+            message([appel], "tool_use"),
+            message([BetaTextBlock(type="text", text="D'accord, je te tutoie.")], "end_turn"),
+        ])
+        assistant, sortie = self.discuter(client, "Tutoie-moi")
+        self.assertIn("a ajusté sa personnalité", sortie)
+        self.assertEqual(wise.charger_ajustements(self.ajustements), ["Tu tutoies l'utilisateur."])
+        assistant.nouvelle_conversation()
+        self.assertIn("## Ajustements demandés par l'utilisateur", assistant.systeme)
+        self.assertIn("Tu tutoies l'utilisateur.", assistant.systeme)
+
+    def test_ajustement_remplace_le_precedent(self):
+        wise.sauver_ajustements(["Tu réponds en deux phrases maximum."], self.ajustements)
+        wise.outil_ajuster_personnalite({"consigne": "Tu réponds en une phrase.",
+                                         "remplace": "Tu réponds en deux phrases maximum."},
+                                        self.ajustements)
+        self.assertEqual(wise.charger_ajustements(self.ajustements), ["Tu réponds en une phrase."])
+        with self.assertRaises(ValueError):
+            wise.outil_ajuster_personnalite({"consigne": "X", "remplace": "inconnu"},
+                                            self.ajustements)
 
     def test_refus_retire_le_tour(self):
         client = FauxClient([message([], "refusal")])
